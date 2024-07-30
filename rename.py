@@ -1,4 +1,4 @@
-import os
+﻿import os
 import requests
 import json
 import time
@@ -7,12 +7,14 @@ import base64
 import hmac
 import hashlib
 import shutil
+from mutagen.mp3 import MP3
+from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TCON, TDRC
 
 # Настройка ACRCloud
 config = {
-    'host': 'your host',
-    'access_key': 'your key',
-    'access_secret': 'your secret',
+    'host': 'YOR HOST',
+    'access_key': 'YOR KEY',
+    'access_secret': 'YOR SECRET',
     'timeout': 60,  # seconds
     'data_type': 'audio',
     'signature_version': '1'
@@ -25,7 +27,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 ffmpeg_path = os.path.join(script_dir, 'ffmpeg/bin/ffmpeg.exe')
 
 # Укажите папку назначения (папка рядом со скриптом)
-destination_folder = os.path.join(script_dir, 'out')
+destination_folder = os.path.join(script_dir, 'output')
 
 # Недопустимые символы для названий файлов в Windows
 invalid_chars = '<>:"/\\|?*'
@@ -102,20 +104,64 @@ def identify_track(file_path):
         print(f"Error identifying segment: {e}")
         return None
 
-# Функция для переименования и перемещения файла
-def rename_and_move_file(file_path, title, artist, destination_folder):
+# Функция для переименования и перемещения файла, добавления метаданных и обложки
+def rename_and_move_file(file_path, music_info, destination_folder):
+    title = music_info.get('title', 'Unknown Title')
+    artist = music_info.get('artists', [{'name': 'Unknown Artist'}])[0]['name']
+    album = music_info.get('album', {}).get('name', 'Unknown Album')
+    genre = ', '.join([g['name'] for g in music_info.get('genres', [])])
+    release_date = music_info.get('release_date', 'Unknown Date')
+    album_cover_url = music_info.get('album', {}).get('cover', {}).get('url', '')
+
     base_name = os.path.basename(file_path)
     new_name = f"{sanitize_filename(title)} - {sanitize_filename(artist)}.mp3"
     new_path = os.path.join(destination_folder, new_name)
     
-    # Переименование и перемещение файла с явным указанием кодировки UTF-8
     try:
         if not os.path.exists(destination_folder):
             os.makedirs(destination_folder)
         shutil.move(file_path, new_path)
         print(f"Renamed and moved {base_name} to {new_path}")
+
+        audio = MP3(new_path, ID3=ID3)
+        
+        # Если у файла нет тега ID3, создайте его
+        try:
+            audio.add_tags()
+        except Exception as e:
+            pass
+
+        # Добавление обложки
+        if album_cover_url:
+            try:
+                cover_data = requests.get(album_cover_url).content
+                audio.tags.add(
+                    APIC(
+                        encoding=3,  # 3 is for utf-8
+                        mime='image/jpeg',  # image type
+                        type=3,  # 3 is for the cover(front) image
+                        desc=u'Cover',
+                        data=cover_data
+                    )
+                )
+                print(f"Added cover from {album_cover_url}")
+            except Exception as e:
+                print(f"Error downloading or adding album cover: {e}")
+        else:
+            print(f"No album cover URL found for {file_path}")
+
+        # Добавление метаданных
+        audio.tags.add(TIT2(encoding=3, text=title))
+        audio.tags.add(TPE1(encoding=3, text=artist))
+        audio.tags.add(TALB(encoding=3, text=album))
+        audio.tags.add(TCON(encoding=3, text=genre))
+        audio.tags.add(TDRC(encoding=3, text=release_date))
+
+        audio.save()
+        print(f"Added metadata and cover to {new_path}")
+
     except Exception as e:
-        print(f"Error moving file: {e}")
+        print(f"Error processing file: {e}")
 
 # Сканирование директории с MP3 файлами
 def scan_directory(directory):
@@ -129,9 +175,7 @@ def scan_directory(directory):
                     os.remove(segment_path)  # Удаляем временный сегмент
                     if result and 'metadata' in result and 'music' in result['metadata']:
                         music = result['metadata']['music'][0]
-                        title = music['title']
-                        artist = music['artists'][0]['name']
-                        rename_and_move_file(file_path, title, artist, destination_folder)
+                        rename_and_move_file(file_path, music, destination_folder)
                     else:
                         print(f"Could not identify {file_path}. Result: {result}")
                 except Exception as e:
